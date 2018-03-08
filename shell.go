@@ -2,6 +2,7 @@
 package shell
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -155,6 +156,7 @@ func (s *Shell) AddNoPin(r io.Reader) (string, error) {
 	return s.AddWithOpts(r, false, false)
 }
 
+// AddWithOpts adds a file to ipfs from the given reader with options, returns the hash of the added file
 func (s *Shell) AddWithOpts(r io.Reader, pin bool, rawLeaves bool) (string, error) {
 	var rc io.ReadCloser
 	if rclose, ok := r.(io.ReadCloser); ok {
@@ -195,6 +197,73 @@ func (s *Shell) AddWithOpts(r io.Reader, pin bool, rawLeaves bool) (string, erro
 	}
 
 	return out.Hash, nil
+}
+
+// AddMultiple adds multiple files to ipfs from the given readers, returns the hash of the added file
+func (s *Shell) AddMultiple(rs map[string]io.Reader) ([]string, error) {
+	return s.AddMultipleWithOpts(rs, true, false, false)
+}
+
+// AddMultipleNoPin adds multiple files to ipfs from the given readers, returns the hash of the added file without pinning the file
+func (s *Shell) AddMultipleNoPin(rs map[string]io.Reader) ([]string, error) {
+	return s.AddMultipleWithOpts(rs, false, false, false)
+}
+
+// AddMultipleWithOpts adds multiple files to ipfs from the given readers with options, returns the hash of the added file
+func (s *Shell) AddMultipleWithOpts(rs map[string]io.Reader, pin bool, rawLeaves bool, wrapWithDirectory bool) ([]string, error) {
+	var frs []files.File
+	for name, r := range rs {
+		var rc io.ReadCloser
+		if rclose, ok := r.(io.ReadCloser); ok {
+			rc = rclose
+		} else {
+			rc = ioutil.NopCloser(r)
+		}
+
+		// handler expects an array of files
+		frs = append(frs, files.NewReaderFile(name, "", rc, nil))
+	}
+
+	slf := files.NewSliceFile("", "", frs)
+	fileReader := files.NewMultiFileReader(slf, true)
+
+	req := NewRequest(context.Background(), s.url, "add")
+	req.Body = fileReader
+	req.Opts["progress"] = "false"
+	if !pin {
+		req.Opts["pin"] = "false"
+	}
+
+	if rawLeaves {
+		req.Opts["raw-leaves"] = "true"
+	}
+
+	if wrapWithDirectory {
+		req.Opts["wrap-with-directory"] = "true"
+	}
+
+	resp, err := req.Send(s.httpcli)
+	if err != nil {
+		return []string{}, err
+	}
+	defer resp.Close()
+	if resp.Error != nil {
+		return []string{}, resp.Error
+	}
+
+	var hashes []string
+	scanner := bufio.NewScanner(resp.Output)
+	for scanner.Scan() {
+		var out object
+		err = json.NewDecoder(strings.NewReader(scanner.Text())).Decode(&out)
+		if err != nil {
+			return []string{}, err
+		}
+
+		hashes = append(hashes, out.Hash)
+	}
+
+	return hashes, nil
 }
 
 func (s *Shell) AddLink(target string) (string, error) {
